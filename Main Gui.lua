@@ -10,7 +10,8 @@
 	Controls:
 	  • RightShift  — hide / show menu
 	  • Drag the top bar to move
-	  • "–" minimize, "×" close
+	  • "^" collapse, "–" hide (RightShift to reopen), "×" ×2 = full close
+	  • Settings → "Unload TaC" also fully closes everything
 
 	Extras:
 	  • Watermark (top-left): TaC | user | fps | ping | time
@@ -37,6 +38,14 @@ local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local RunService       = game:GetService("RunService")
 local Debris           = game:GetService("Debris")
+
+local Unloaded = false
+local Connections = {}
+local function bind(signal, fn)
+	local c = signal:Connect(fn)
+	table.insert(Connections, c)
+	return c
+end
 
 local player    = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -143,7 +152,7 @@ local function shimmerGradient(rotation)
 end
 
 local shimmerT = 0
-RunService.RenderStepped:Connect(function(dt)
+bind(RunService.RenderStepped, function(dt)
 	shimmerT += dt
 	local kp = {}
 	for i = 0, 6 do
@@ -171,7 +180,7 @@ local function makeDraggable(handle, target)
 			end)
 		end
 	end)
-	UserInputService.InputChanged:Connect(function(input)
+	bind(UserInputService.InputChanged, function(input)
 		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
 			or input.UserInputType == Enum.UserInputType.Touch) then
 			local d = input.Position - dragStart
@@ -233,7 +242,7 @@ local wmText = create("TextLabel", {
 
 do
 	local frames, last = 0, os.clock()
-	RunService.RenderStepped:Connect(function()
+	bind(RunService.RenderStepped, function()
 		frames += 1
 		local now = os.clock()
 		if now - last >= 0.5 then
@@ -472,7 +481,7 @@ function Library:CreateWindow(cfg)
 
 	local statusPill = create("Frame", {
 		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -64, 0.5, 0),
+		Position = UDim2.new(1, -88, 0.5, 0),
 		Size = UDim2.fromOffset(0, 18),
 		AutomaticSize = Enum.AutomaticSize.X,
 		BackgroundColor3 = Color3.fromRGB(10, 28, 18),
@@ -522,8 +531,10 @@ function Library:CreateWindow(cfg)
 		b.MouseLeave:Connect(function() tween(b, 0.12, { BackgroundTransparency = 1, TextColor3 = THEME.SubText }) end)
 		return b
 	end
-	local closeBtn = topButton("×", -8, Color3.fromRGB(255, 80, 110))
-	local minBtn   = topButton("–", -32)
+	local closeBtn = topButton("×", -8, Color3.fromRGB(255, 80, 110)) -- full close (unload)
+	local hideBtn  = topButton("–", -32)                              -- hide (RightShift to reopen)
+	local minBtn   = topButton("^", -56)                              -- collapse to top bar
+	minBtn.TextSize = 11
 
 	create("Frame", {
 		Position = UDim2.fromOffset(0, 38),
@@ -678,19 +689,36 @@ function Library:CreateWindow(cfg)
 	function self:ToggleMinimize()
 		self.Minimized = not self.Minimized
 		tween(root, 0.35, { Size = UDim2.fromOffset(WINDOW_SIZE.X, self.Minimized and 41 or WINDOW_SIZE.Y) })
-		minBtn.Text = self.Minimized and "+" or "–"
+		minBtn.Text = self.Minimized and "v" or "^"
 	end
 
 	minBtn.MouseButton1Click:Connect(function() self:ToggleMinimize() end)
-	closeBtn.MouseButton1Click:Connect(function()
+	hideBtn.MouseButton1Click:Connect(function()
 		self:Hide()
 		Library:Notify({ Title = "menu hidden", Text = "press " .. TOGGLE_KEY.Name .. " to open", Duration = 3 })
 	end)
-	UserInputService.InputBegan:Connect(function(input, processed)
-		if processed then return end
-		if input.KeyCode == TOGGLE_KEY then
-			if self.Hidden then self:Show() else self:Hide() end
+
+	-- × = full close. First click asks for confirmation, second click (within 2s) unloads.
+	local confirmUntil = 0
+	closeBtn.MouseButton1Click:Connect(function()
+		if os.clock() < confirmUntil then
+			self:Hide()
+			task.delay(0.25, function() if Library.Unload then Library.Unload() end end)
+		else
+			confirmUntil = os.clock() + 2
+			Library:Notify({ Title = "close TaC?", Text = "click × again to fully close", Duration = 2 })
+			closeBtn.TextColor3 = Color3.fromRGB(255, 80, 110)
+			task.delay(2, function()
+				if closeBtn.Parent then closeBtn.TextColor3 = THEME.SubText end
+			end)
 		end
+	end)
+	-- NOTE: no "processed" check here — Shift is used by Shift Lock, so Roblox
+	-- marks RightShift as processed and the menu would never reopen.
+	bind(UserInputService.InputBegan, function(input)
+		if input.KeyCode ~= TOGGLE_KEY then return end
+		if UserInputService:GetFocusedTextBox() then return end -- typing in chat / textbox
+		if self.Hidden then self:Show() else self:Hide() end
 	end)
 
 	return self
@@ -1069,13 +1097,13 @@ function Tab:AddSlider(cfg)
 			fromX(input.Position.X)
 		end
 	end)
-	UserInputService.InputEnded:Connect(function(input)
+	bind(UserInputService.InputEnded, function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = false
 		end
 	end)
-	UserInputService.InputChanged:Connect(function(input)
+	bind(UserInputService.InputChanged, function(input)
 		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
 			or input.UserInputType == Enum.UserInputType.Touch) then
 			fromX(input.Position.X)
@@ -1284,7 +1312,7 @@ function Tab:AddKeybind(cfg)
 		box.Text = "[...]"
 		boxStroke.Color = THEME.Accent
 	end)
-	UserInputService.InputBegan:Connect(function(input, processed)
+	bind(UserInputService.InputBegan, function(input, processed)
 		if listening and input.UserInputType == Enum.UserInputType.Keyboard then
 			listening = false
 			if input.KeyCode ~= Enum.KeyCode.Escape then key = input.KeyCode end
@@ -1537,7 +1565,7 @@ local ESP = {
 }
 
 local camera = workspace.CurrentCamera
-workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+bind(workspace:GetPropertyChangedSignal("CurrentCamera"), function()
 	camera = workspace.CurrentCamera
 end)
 
@@ -1688,7 +1716,7 @@ local function refreshESPTargets()
 end
 
 task.spawn(function()
-	while true do
+	while not Unloaded do
 		task.wait(1)
 		refreshESPTargets()
 	end
@@ -1701,7 +1729,7 @@ local function hideParts(e)
 	e.Tracer.Visible = false
 end
 
-RunService.RenderStepped:Connect(function()
+bind(RunService.RenderStepped, function()
 	if not espAny() or not camera then return end
 	local vp = camera.ViewportSize
 	local camPos = camera.CFrame.Position
@@ -1916,7 +1944,7 @@ end
 ---------------------------------------------------------------- M1 spam loop
 local auraTargetsCache, auraScanTime, warnedNoWeapon = {}, 0, false
 task.spawn(function()
-	while true do
+	while not Unloaded do
 		task.wait(1 / math.max(Aura.CPS, 1))
 		if isWeaponMode() then
 			local char = player.Character
@@ -1984,7 +2012,7 @@ local function restoreHitbox(part)
 end
 
 task.spawn(function()
-	while true do
+	while not Unloaded do
 		task.wait(0.25)
 		local active = isWeaponMode() and Aura.HitboxSize > 0
 		local keep = {}
@@ -2033,7 +2061,7 @@ local function hookAnimator(char)
 	end)
 end
 if player.Character then task.spawn(hookAnimator, player.Character) end
-player.CharacterAdded:Connect(hookAnimator)
+bind(player.CharacterAdded, hookAnimator)
 
 -- range circle under the player
 local ring = create("Part", {
@@ -2047,7 +2075,7 @@ local ring = create("Part", {
 	Material = Enum.Material.ForceField,
 	Transparency = 0.2,
 })
-RunService.RenderStepped:Connect(function()
+bind(RunService.RenderStepped, function()
 	local char = player.Character
 	local root = char and char:FindFirstChild("HumanoidRootPart")
 	if Aura.On and Aura.ShowRange and root then
@@ -2200,8 +2228,8 @@ local function playerNames()
 	return names
 end
 local tpDropdown = Movement:AddDropdown({ Name = "Target", Options = playerNames() })
-Players.PlayerAdded:Connect(function() tpDropdown:Refresh(playerNames(), true) end)
-Players.PlayerRemoving:Connect(function() task.wait(); tpDropdown:Refresh(playerNames(), true) end)
+bind(Players.PlayerAdded, function() tpDropdown:Refresh(playerNames(), true) end)
+bind(Players.PlayerRemoving, function() task.wait(); tpDropdown:Refresh(playerNames(), true) end)
 Movement:AddButton({
 	Name = "Teleport to player",
 	Callback = function()
@@ -2268,6 +2296,26 @@ Settings:AddToggle({ Name = "Watermark", Default = true, NoList = true, Callback
 	watermark.Visible = s
 end })
 Settings:AddToggle({ Name = "Arraylist", Default = true, NoList = true, Callback = function(s) arraylist.Visible = s end })
+Settings:AddSection("Menu")
+local function unloadAll()
+	if Unloaded then return end
+	Unloaded = true
+	Aura.On = false
+	for part in pairs(resized) do restoreHitbox(part) end
+	ESP.Box, ESP.Name, ESP.Tracers, ESP.Health, ESP.Chams = false, false, false, false, false
+	clearESP()
+	for _, c in ipairs(Connections) do c:Disconnect() end
+	for _, c in pairs(watchedHumanoids) do c:Disconnect() end
+	ring:Destroy()
+	espGui:Destroy()
+	ScreenGui:Destroy()
+	print("[TaC] unloaded")
+end
+Library.Unload = unloadAll
+Settings:AddButton({ Name = "Unload TaC", Description = "fully close the menu (until rejoin)", Callback = function()
+	Window:Hide()
+	task.delay(0.25, unloadAll)
+end })
 Settings:AddParagraph({
 	Title = "About",
 	Text = "TaC · build 1.0.4\nmenu key: RightShift",
