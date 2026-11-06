@@ -1,9 +1,11 @@
 --[[
-	TaC — fake "exploit" panel (GUI only)
+	TaC — "exploit" panel for your own game
 	-------------------------------------------------------
 	Put it in: LocalScript → StarterPlayer > StarterPlayerScripts
-	Nothing here actually cheats — every callback is a stub that
-	only shows a notification. Hook your own logic where marked TODO.
+	ONE LocalScript, no server script needed.
+	REAL modules: ESP (Visuals tab) and Kill Aura (Combat tab).
+	Everything else is a stub that only shows a notification —
+	hook your own logic where marked TODO.
 
 	Controls:
 	  • RightShift  — hide / show menu
@@ -34,6 +36,7 @@ local Players          = game:GetService("Players")
 local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local RunService       = game:GetService("RunService")
+local Debris           = game:GetService("Debris")
 
 local player    = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -1518,6 +1521,546 @@ local function playIntro(onDone)
 end
 
 ---------------------------------------------------------------------
+-- ESP (REAL, client-side — purely visual)
+-- Мобы ищутся в папках ниже (как workspace.Enemies в Blox Fruits).
+-- Если ни одной папки нет — ищутся все Humanoid в workspace.
+---------------------------------------------------------------------
+local ENEMY_FOLDERS = { "Enemies", "NPCs", "Mobs" }
+
+local ESP = {
+	Box = false, Name = false, Tracers = false, Health = false, Chams = false,
+	ShowPlayers = true, ShowNPCs = true, TeamCheck = false,
+	MaxDistance = 800,
+	BoxStyle = "Corner",
+	NPCColor  = Color3.fromRGB(255, 165, 60),
+	TeamColor = Color3.fromRGB(70, 240, 130),
+}
+
+local camera = workspace.CurrentCamera
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+	camera = workspace.CurrentCamera
+end)
+
+local espGui = create("ScreenGui", {
+	Name = "TaC_ESP",
+	ResetOnSpawn = false,
+	IgnoreGuiInset = true, -- so viewport coords match GUI coords
+	DisplayOrder = 10,
+	Parent = playerGui,
+})
+
+local espEntries = {}
+
+local function getRoot(model)
+	return model:FindFirstChild("HumanoidRootPart")
+		or model:FindFirstChild("UpperTorso")
+		or model:FindFirstChild("Torso")
+		or model.PrimaryPart
+end
+
+local function collectNPCModels()
+	local models, seen, foundFolder = {}, {}, false
+	local function add(h)
+		local m = h.Parent
+		if m and m:IsA("Model") and not seen[m] and not Players:GetPlayerFromCharacter(m) then
+			seen[m] = true
+			table.insert(models, m)
+		end
+	end
+	for _, name in ipairs(ENEMY_FOLDERS) do
+		local f = workspace:FindFirstChild(name)
+		if f then
+			foundFolder = true
+			for _, d in ipairs(f:GetDescendants()) do
+				if d:IsA("Humanoid") then add(d) end
+			end
+		end
+	end
+	if not foundFolder then
+		for _, d in ipairs(workspace:GetDescendants()) do
+			if d:IsA("Humanoid") then add(d) end
+		end
+	end
+	return models
+end
+
+local function espAny()
+	return ESP.Box or ESP.Name or ESP.Tracers or ESP.Health or ESP.Chams
+end
+
+local function destroyEntry(e)
+	for _, k in ipairs({ "Box", "Label", "HpBack", "Tracer", "Highlight" }) do
+		if e[k] then e[k]:Destroy() end
+	end
+	espEntries[e.Model] = nil
+end
+
+local function newEntry(model, plr)
+	local e = { Model = model, IsPlayer = plr ~= nil, Player = plr }
+
+	e.Box = create("Frame", { BackgroundTransparency = 1, Visible = false, Parent = espGui })
+	e.BoxStroke = create("UIStroke", { Thickness = 1, Parent = e.Box })
+	e.Corners = {}
+	local L = 0.28
+	local specs = {
+		{ UDim2.new(0, 0, 0, 0),      UDim2.new(L, 0, 0, 1) },
+		{ UDim2.new(0, 0, 0, 0),      UDim2.new(0, 1, L, 0) },
+		{ UDim2.new(1 - L, 0, 0, 0),  UDim2.new(L, 0, 0, 1) },
+		{ UDim2.new(1, -1, 0, 0),     UDim2.new(0, 1, L, 0) },
+		{ UDim2.new(0, 0, 1, -1),     UDim2.new(L, 0, 0, 1) },
+		{ UDim2.new(0, 0, 1 - L, 0),  UDim2.new(0, 1, L, 0) },
+		{ UDim2.new(1 - L, 0, 1, -1), UDim2.new(L, 0, 0, 1) },
+		{ UDim2.new(1, -1, 1 - L, 0), UDim2.new(0, 1, L, 0) },
+	}
+	for _, s in ipairs(specs) do
+		table.insert(e.Corners, create("Frame", { Position = s[1], Size = s[2], BorderSizePixel = 0, Parent = e.Box }))
+	end
+
+	e.Label = create("TextLabel", {
+		AnchorPoint = Vector2.new(0.5, 1),
+		Size = UDim2.fromOffset(220, 14),
+		BackgroundTransparency = 1,
+		Font = THEME.Font,
+		RichText = true,
+		TextSize = 11,
+		TextStrokeTransparency = 0.4,
+		Visible = false,
+		Parent = espGui,
+	})
+	e.HpBack = create("Frame", {
+		AnchorPoint = Vector2.new(1, 0),
+		BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 0.3,
+		BorderSizePixel = 0,
+		Visible = false,
+		Parent = espGui,
+	})
+	e.HpFill = create("Frame", {
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.fromScale(0, 1),
+		Size = UDim2.fromScale(1, 1),
+		BorderSizePixel = 0,
+		Parent = e.HpBack,
+	})
+	e.Tracer = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BorderSizePixel = 0,
+		Visible = false,
+		Parent = espGui,
+	})
+
+	-- vertical size/offset of the model relative to its root (works for big bosses too)
+	local root = getRoot(model)
+	local ok, cf, size = pcall(model.GetBoundingBox, model)
+	if model:GetAttribute("TaC_Expanded") then ok = false end -- hitbox is enlarged, bbox would lie
+	if ok and root then
+		e.Height = math.clamp(size.Y, 3, 60)
+		e.OffsetY = cf.Position.Y - root.Position.Y
+	else
+		e.Height, e.OffsetY = 5.5, -0.5
+	end
+
+	espEntries[model] = e
+	return e
+end
+
+local function clearESP()
+	for _, e in pairs(espEntries) do destroyEntry(e) end
+end
+
+local function refreshESPTargets()
+	if not espAny() then clearESP() return end
+	local wanted = {}
+	if ESP.ShowPlayers then
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= player and p.Character then wanted[p.Character] = p end
+		end
+	end
+	if ESP.ShowNPCs then
+		for _, m in ipairs(collectNPCModels()) do wanted[m] = false end
+	end
+	for m, e in pairs(espEntries) do
+		if wanted[m] == nil or not m.Parent then destroyEntry(e) end
+	end
+	for m, p in pairs(wanted) do
+		if not espEntries[m] then newEntry(m, p or nil) end
+	end
+end
+
+task.spawn(function()
+	while true do
+		task.wait(1)
+		refreshESPTargets()
+	end
+end)
+
+local function hideParts(e)
+	e.Box.Visible = false
+	e.Label.Visible = false
+	e.HpBack.Visible = false
+	e.Tracer.Visible = false
+end
+
+RunService.RenderStepped:Connect(function()
+	if not espAny() or not camera then return end
+	local vp = camera.ViewportSize
+	local camPos = camera.CFrame.Position
+	local chamList = {}
+
+	for model, e in pairs(espEntries) do
+		e._cham = false
+		local root = model.Parent and getRoot(model)
+		local hum = model:FindFirstChildOfClass("Humanoid")
+		local shown = false
+
+		if root and hum and hum.Health > 0 then
+			local dist = (root.Position - camPos).Magnitude
+			if dist <= ESP.MaxDistance then
+				local color
+				if e.IsPlayer then
+					local sameTeam = ESP.TeamCheck and e.Player and e.Player.Team ~= nil and e.Player.Team == player.Team
+					color = sameTeam and ESP.TeamColor or THEME.Accent
+				else
+					color = ESP.NPCColor
+				end
+
+				local center = root.Position + Vector3.new(0, e.OffsetY, 0)
+				local topV = camera:WorldToViewportPoint(center + Vector3.new(0, e.Height / 2, 0))
+				local botV = camera:WorldToViewportPoint(center - Vector3.new(0, e.Height / 2, 0))
+
+				if topV.Z > 0 and botV.Z > 0 then
+					shown = true
+					local h = math.max(botV.Y - topV.Y, 4)
+					local w = h * 0.55
+					local cx = (topV.X + botV.X) / 2
+					local x, y = cx - w / 2, topV.Y
+
+					if ESP.Box then
+						local cornerStyle = ESP.BoxStyle == "Corner"
+						e.Box.Visible = true
+						e.Box.Position = UDim2.fromOffset(x, y)
+						e.Box.Size = UDim2.fromOffset(w, h)
+						e.BoxStroke.Enabled = not cornerStyle
+						e.BoxStroke.Color = color
+						for _, c in ipairs(e.Corners) do
+							c.Visible = cornerStyle
+							c.BackgroundColor3 = color
+						end
+					else
+						e.Box.Visible = false
+					end
+
+					if ESP.Name then
+						local name = (e.IsPlayer and e.Player) and e.Player.DisplayName or model.Name
+						e.Label.Visible = true
+						e.Label.Position = UDim2.fromOffset(cx, y - 2)
+						e.Label.TextColor3 = color
+						e.Label.Text = ('%s <font color="#AAAAAA">[%dm]</font>'):format(name, math.floor(dist))
+					else
+						e.Label.Visible = false
+					end
+
+					if ESP.Health then
+						local pct = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+						e.HpBack.Visible = true
+						e.HpBack.Position = UDim2.fromOffset(x - 3, y)
+						e.HpBack.Size = UDim2.fromOffset(2, h)
+						e.HpFill.Size = UDim2.fromScale(1, pct)
+						e.HpFill.BackgroundColor3 = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(70, 240, 130), pct)
+					else
+						e.HpBack.Visible = false
+					end
+
+					if ESP.Tracers then
+						local from = Vector2.new(vp.X / 2, vp.Y - 2)
+						local to = Vector2.new(cx, botV.Y)
+						local d = to - from
+						e.Tracer.Visible = true
+						e.Tracer.Position = UDim2.fromOffset((from.X + to.X) / 2, (from.Y + to.Y) / 2)
+						e.Tracer.Size = UDim2.fromOffset(d.Magnitude, 1)
+						e.Tracer.Rotation = math.deg(math.atan2(d.Y, d.X))
+						e.Tracer.BackgroundColor3 = color
+					else
+						e.Tracer.Visible = false
+					end
+				end
+
+				if ESP.Chams then table.insert(chamList, { e, dist, color }) end
+			end
+		end
+
+		if not shown then hideParts(e) end
+	end
+
+	-- Chams: only the nearest 30 (Roblox renders max 31 Highlights at once)
+	table.sort(chamList, function(a, b) return a[2] < b[2] end)
+	for i, c in ipairs(chamList) do
+		if i > 30 then break end
+		local e = c[1]
+		e._cham = true
+		if not e.Highlight or not e.Highlight.Parent then
+			e.Highlight = create("Highlight", {
+				DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+				FillTransparency = 0.6,
+				OutlineTransparency = 0,
+				Adornee = e.Model,
+				Parent = e.Model,
+			})
+		end
+		e.Highlight.Enabled = true
+		e.Highlight.FillColor = c[3]
+		e.Highlight.OutlineColor = c[3]
+	end
+	for _, e in pairs(espEntries) do
+		if e.Highlight and not e._cham then e.Highlight.Enabled = false end
+	end
+end)
+
+---------------------------------------------------------------------
+-- KILL AURA (REAL, client-only — spams your weapon's normal M1)
+---------------------------------------------------------------------
+local Aura = {
+	On = false,
+	Range = 18,
+	ShowRange = true,
+	Weapon = "Melee",     -- "Melee" | "Sword" | "Fruit" | "Any"
+	CPS = 10,             -- M1 clicks per second
+	HitboxSize = 10,      -- expanded enemy hitbox (studs), 0 = off
+	ShowHitbox = false,
+	NoAnim = true,        -- stop attack animations
+	FaceTarget = true,    -- turn to the nearest enemy before each hit
+	TPToTarget = false,   -- teleport behind the target
+	TargetPlayers = false,
+}
+
+-- How weapon types are detected (Blox Fruits style: Tool.ToolTip = "Melee" / "Sword" / "Blox Fruit").
+-- Also checks attributes WeaponType / Type on the Tool, then the tool name.
+local WEAPON_TYPES = {
+	Melee = { "melee", "combat", "fighting" },
+	Sword = { "sword" },
+	Fruit = { "blox fruit", "fruit" },
+}
+
+-- purple flash on the enemy whenever it loses HP while the aura is on
+local function flashHit(model)
+	if not model or not model.Parent then return end
+	local h = create("Highlight", {
+		DepthMode = Enum.HighlightDepthMode.Occluded,
+		FillColor = THEME.Accent,
+		FillTransparency = 0.35,
+		OutlineTransparency = 1,
+		Adornee = model,
+		Parent = model,
+	})
+	tween(h, 0.3, { FillTransparency = 1 })
+	Debris:AddItem(h, 0.35)
+end
+
+local watchedHumanoids = setmetatable({}, { __mode = "k" })
+local function watchHealth(hum, model)
+	if watchedHumanoids[hum] then return end
+	local last = hum.Health
+	watchedHumanoids[hum] = hum.HealthChanged:Connect(function(hp)
+		if hp < last and Aura.On then flashHit(model) end
+		last = hp
+	end)
+end
+
+---------------------------------------------------------------- weapon helpers
+local function toolKind(tool)
+	local t = tool:GetAttribute("WeaponType") or tool:GetAttribute("Type") or tool.ToolTip
+	return string.lower(tostring(t or ""))
+end
+
+local function toolMatches(tool, kind)
+	if kind == "Any" then return true end
+	local keys = WEAPON_TYPES[kind] or {}
+	local t, n = toolKind(tool), string.lower(tool.Name)
+	for _, k in ipairs(keys) do
+		if string.find(t, k, 1, true) then return true end
+	end
+	for _, k in ipairs(keys) do
+		if string.find(n, k, 1, true) then return true end
+	end
+	return false
+end
+
+local function findWeapon()
+	local char = player.Character
+	if not char then return nil end
+	local equipped = char:FindFirstChildOfClass("Tool")
+	if equipped and toolMatches(equipped, Aura.Weapon) then return equipped end
+	local backpack = player:FindFirstChildOfClass("Backpack")
+	if backpack then
+		for _, t in ipairs(backpack:GetChildren()) do
+			if t:IsA("Tool") and toolMatches(t, Aura.Weapon) then return t end
+		end
+	end
+	return nil
+end
+
+local function auraTargets()
+	local list = collectNPCModels()
+	if Aura.TargetPlayers then
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= player and p.Character then table.insert(list, p.Character) end
+		end
+	end
+	return list
+end
+
+local function isWeaponMode()
+	return Aura.On
+end
+
+---------------------------------------------------------------- M1 spam loop
+local auraTargetsCache, auraScanTime, warnedNoWeapon = {}, 0, false
+task.spawn(function()
+	while true do
+		task.wait(1 / math.max(Aura.CPS, 1))
+		if isWeaponMode() then
+			local char = player.Character
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if root and hum and hum.Health > 0 then
+				if os.clock() - auraScanTime > 1 then
+					auraTargetsCache = auraTargets()
+					auraScanTime = os.clock()
+				end
+
+				-- nearest alive target in range
+				local best, bestRoot, bestD = nil, nil, math.huge
+				for _, m in ipairs(auraTargetsCache) do
+					local h = m.Parent and m:FindFirstChildOfClass("Humanoid")
+					local r = h and getRoot(m)
+					if r and h.Health > 0 and m ~= char then
+						local d = (r.Position - root.Position).Magnitude
+						if d <= Aura.Range and d < bestD then
+							best, bestRoot, bestD = m, r, d
+						end
+					end
+				end
+
+				if best then
+					local tool = findWeapon()
+					if tool then
+						warnedNoWeapon = false
+						if tool.Parent ~= char then hum:EquipTool(tool) end
+
+						local tp = bestRoot.Position
+						if Aura.TPToTarget then
+							local behind = bestRoot.CFrame * CFrame.new(0, 0, 3)
+							root.CFrame = CFrame.lookAt(behind.Position, Vector3.new(tp.X, behind.Position.Y, tp.Z))
+						elseif Aura.FaceTarget then
+							root.CFrame = CFrame.lookAt(root.Position, Vector3.new(tp.X, root.Position.Y, tp.Z))
+						end
+
+						watchHealth(best:FindFirstChildOfClass("Humanoid"), best)
+						tool:Activate() -- fires Tool.Activated → your normal M1
+					elseif not warnedNoWeapon then
+						warnedNoWeapon = true
+						Library:Notify({ Title = "Kill Aura", Text = "no " .. Aura.Weapon .. " weapon in backpack", Duration = 3 })
+					end
+				end
+			end
+		end
+	end
+end)
+
+---------------------------------------------------------------- hitbox expander (local)
+-- Enlarges enemy HumanoidRootParts on YOUR client only. Works if your
+-- hit detection runs on the client (or the server trusts the client's hits).
+local resized = {} -- [part] = original size
+local function restoreHitbox(part)
+	local orig = resized[part]
+	if orig and part.Parent then
+		part.Size = orig.Size
+		part.Transparency = orig.Transparency
+		part.CanCollide = orig.CanCollide
+		local model = part.Parent
+		if model then model:SetAttribute("TaC_Expanded", nil) end
+	end
+	resized[part] = nil
+end
+
+task.spawn(function()
+	while true do
+		task.wait(0.25)
+		local active = isWeaponMode() and Aura.HitboxSize > 0
+		local keep = {}
+		if active then
+			local char = player.Character
+			local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+			if myRoot then
+				for _, m in ipairs(auraTargetsCache) do
+					local r = m.Parent and m:FindFirstChild("HumanoidRootPart")
+					if r and m ~= char and (r.Position - myRoot.Position).Magnitude <= Aura.Range + 60 then
+						if not resized[r] then
+							resized[r] = { Size = r.Size, Transparency = r.Transparency, CanCollide = r.CanCollide }
+							m:SetAttribute("TaC_Expanded", true)
+						end
+						local s = Aura.HitboxSize
+						r.Size = Vector3.new(s, s, s)
+						r.Transparency = Aura.ShowHitbox and 0.75 or 1
+						r.CanCollide = false
+						keep[r] = true
+					end
+				end
+			end
+		end
+		for part in pairs(resized) do
+			if not keep[part] then restoreHitbox(part) end
+		end
+	end
+end)
+
+---------------------------------------------------------------- no attack animations
+-- Stops Action-priority animations (attacks) while the aura is on.
+-- Walk/idle (Core/Movement) keep playing.
+-- NOTE: if your combat deals damage on animation markers
+-- (GetMarkerReachedSignal), turn "No Animations" off.
+local function hookAnimator(char)
+	local hum = char:WaitForChild("Humanoid", 10)
+	local animator = hum and hum:WaitForChild("Animator", 10)
+	if not animator then return end
+	animator.AnimationPlayed:Connect(function(track)
+		if isWeaponMode() and Aura.NoAnim then
+			local p = track.Priority
+			if p ~= Enum.AnimationPriority.Core and p.Value >= Enum.AnimationPriority.Action.Value then
+				track:Stop(0)
+			end
+		end
+	end)
+end
+if player.Character then task.spawn(hookAnimator, player.Character) end
+player.CharacterAdded:Connect(hookAnimator)
+
+-- range circle under the player
+local ring = create("Part", {
+	Name = "TaC_AuraRange",
+	Shape = Enum.PartType.Cylinder,
+	Anchored = true,
+	CanCollide = false,
+	CanTouch = false,
+	CanQuery = false,
+	CastShadow = false,
+	Material = Enum.Material.ForceField,
+	Transparency = 0.2,
+})
+RunService.RenderStepped:Connect(function()
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if Aura.On and Aura.ShowRange and root then
+		ring.Size = Vector3.new(0.2, Aura.Range * 2, Aura.Range * 2)
+		ring.CFrame = CFrame.new(root.Position - Vector3.new(0, 2.9, 0)) * CFrame.Angles(0, 0, math.rad(90))
+		ring.Color = THEME.Accent
+		if ring.Parent ~= workspace then ring.Parent = workspace end
+	elseif ring.Parent then
+		ring.Parent = nil
+	end
+end)
+
+---------------------------------------------------------------------
 -- BUILD THE MENU
 -- Every feature is fake: callbacks only show a notification.
 -- Put your own logic where it says TODO (e.g. fire a RemoteEvent
@@ -1567,9 +2110,34 @@ Combat:AddSlider({ Name = "FOV", Min = 10, Max = 360, Default = 120, Suffix = "�
 Combat:AddSlider({ Name = "Smoothness", Min = 0, Max = 1, Default = 0.4, Step = 0.1 })
 Combat:AddDropdown({ Name = "Target Part", Options = { "Head", "Torso", "Closest" }, Default = "Head" })
 Combat:AddKeybind({ Name = "Aim Key", Default = Enum.KeyCode.E })
+Combat:AddSection("Kill Aura")
+Combat:AddToggle({ Name = "Kill Aura", Description = "auto M1 with your weapon", Callback = function(s)
+	fake("Kill Aura")(s)
+	Aura.On = s
+end })
+Combat:AddDropdown({ Name = "Weapon", Options = { "Melee", "Sword", "Fruit", "Any" }, Default = "Melee",
+	Callback = function(o) Aura.Weapon = o end })
+Combat:AddSlider({ Name = "Aura Range", Min = 5, Max = 50, Default = 18, Suffix = " st", Callback = function(v)
+	Aura.Range = v
+end })
+Combat:AddSlider({ Name = "Attack Speed", Min = 1, Max = 20, Default = 10, Suffix = " cps",
+	Callback = function(v) Aura.CPS = v end })
+Combat:AddSlider({ Name = "Hitbox Size", Min = 0, Max = 30, Default = 10, Suffix = " st", Callback = function(v)
+	Aura.HitboxSize = v
+end })
+Combat:AddToggle({ Name = "No Animations", Default = true, NoList = true, Callback = function(s) Aura.NoAnim = s end })
+Combat:AddToggle({ Name = "Face Target", Default = true, NoList = true, Callback = function(s) Aura.FaceTarget = s end })
+Combat:AddToggle({ Name = "TP to Target", Description = "teleport behind the enemy", Callback = function(s)
+	fake("TP to Target")(s)
+	Aura.TPToTarget = s
+end })
+Combat:AddToggle({ Name = "Target Players", Description = "PvP", NoList = true, Callback = function(s)
+	Aura.TargetPlayers = s
+	auraScanTime = 0
+end })
+Combat:AddToggle({ Name = "Show Range", Default = true, NoList = true, Callback = function(s) Aura.ShowRange = s end })
+Combat:AddToggle({ Name = "Show Hitbox", NoList = true, Callback = function(s) Aura.ShowHitbox = s end })
 Combat:AddSection("Rage")
-Combat:AddToggle({ Name = "Kill Aura", Description = "hits everyone in range", Callback = fake("Kill Aura") })
-Combat:AddSlider({ Name = "Aura Range", Min = 5, Max = 50, Default = 18, Suffix = " st" })
 Combat:AddToggle({ Name = "Triggerbot", Callback = fake("Triggerbot") })
 Combat:AddToggle({ Name = "No Recoil", Callback = fake("No Recoil") })
 Combat:AddToggle({ Name = "Rapid Fire", Callback = fake("Rapid Fire") })
@@ -1578,13 +2146,33 @@ Combat:AddToggle({ Name = "Spinbot", Callback = fake("Spinbot") })
 -- VISUALS
 local Visuals = Window:CreateTab({ Name = "Visuals", Description = "esp & render" })
 Visuals:AddSection("ESP")
-Visuals:AddToggle({ Name = "Box ESP", Callback = fake("Box ESP") })
-Visuals:AddToggle({ Name = "Name ESP", Callback = fake("Name ESP") })
-Visuals:AddToggle({ Name = "Tracers", Callback = fake("Tracers") })
-Visuals:AddToggle({ Name = "Health Bars", Callback = fake("Health Bars") })
-Visuals:AddToggle({ Name = "Chams", Description = "see players through walls", Callback = fake("Chams") })
-Visuals:AddSlider({ Name = "Max Distance", Min = 50, Max = 2000, Default = 800, Step = 50, Suffix = " st" })
-Visuals:AddDropdown({ Name = "Box Style", Options = { "2D", "3D", "Corner" }, Default = "Corner" })
+local function espToggle(name, key)
+	return function(s)
+		fake(name)(s)
+		ESP[key] = s
+		refreshESPTargets()
+	end
+end
+Visuals:AddToggle({ Name = "Box ESP", Callback = espToggle("Box ESP", "Box") })
+Visuals:AddToggle({ Name = "Name ESP", Callback = espToggle("Name ESP", "Name") })
+Visuals:AddToggle({ Name = "Tracers", Callback = espToggle("Tracers", "Tracers") })
+Visuals:AddToggle({ Name = "Health Bars", Callback = espToggle("Health Bars", "Health") })
+Visuals:AddToggle({ Name = "Chams", Description = "see targets through walls", Callback = espToggle("Chams", "Chams") })
+Visuals:AddSlider({ Name = "Max Distance", Min = 50, Max = 2000, Default = 800, Step = 50, Suffix = " st",
+	Callback = function(v) ESP.MaxDistance = v end })
+Visuals:AddDropdown({ Name = "Box Style", Options = { "Corner", "2D" }, Default = "Corner",
+	Callback = function(o) ESP.BoxStyle = o end })
+Visuals:AddSection("ESP Filter")
+Visuals:AddToggle({ Name = "Players", Default = true, NoList = true, Callback = function(s)
+	ESP.ShowPlayers = s
+	refreshESPTargets()
+end })
+Visuals:AddToggle({ Name = "NPCs / Mobs", Default = true, NoList = true, Callback = function(s)
+	ESP.ShowNPCs = s
+	refreshESPTargets()
+end })
+Visuals:AddToggle({ Name = "Team Check", Description = "teammates in green", NoList = true,
+	Callback = function(s) ESP.TeamCheck = s end })
 Visuals:AddSection("World")
 Visuals:AddToggle({ Name = "Fullbright", Callback = fake("Fullbright") })
 Visuals:AddToggle({ Name = "No Fog", Callback = fake("No Fog") })
