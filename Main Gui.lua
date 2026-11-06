@@ -1995,6 +1995,26 @@ task.spawn(function()
 	end
 end)
 
+---------------------------------------------------------------- auto clicker
+-- Spams M1 with the currently equipped tool (works with the aura off).
+local AutoClick = { On = false, CPS = 10, OnlyWhenHolding = false }
+
+task.spawn(function()
+	while not Unloaded do
+		task.wait(1 / math.max(AutoClick.CPS, 1))
+		if AutoClick.On and not Aura.On then -- the aura already clicks on its own
+			local char = player.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			local tool = char and char:FindFirstChildOfClass("Tool")
+			local holding = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+			if tool and hum and hum.Health > 0 and not UserInputService:GetFocusedTextBox()
+				and (not AutoClick.OnlyWhenHolding or holding) then
+				tool:Activate()
+			end
+		end
+	end
+end)
+
 ---------------------------------------------------------------- hitbox expander (local)
 -- Enlarges enemy HumanoidRootParts on YOUR client only. Works if your
 -- hit detection runs on the client (or the server trusts the client's hits).
@@ -2165,6 +2185,18 @@ Combat:AddToggle({ Name = "Target Players", Description = "PvP", NoList = true, 
 end })
 Combat:AddToggle({ Name = "Show Range", Default = true, NoList = true, Callback = function(s) Aura.ShowRange = s end })
 Combat:AddToggle({ Name = "Show Hitbox", NoList = true, Callback = function(s) Aura.ShowHitbox = s end })
+Combat:AddSection("Auto Clicker")
+local autoClickToggle = Combat:AddToggle({ Name = "Auto Clicker", Description = "spams M1 with equipped weapon", Callback = function(s)
+	fake("Auto Clicker")(s)
+	AutoClick.On = s
+end })
+Combat:AddSlider({ Name = "Click Speed", Min = 1, Max = 20, Default = 10, Suffix = " cps",
+	Callback = function(v) AutoClick.CPS = v end })
+Combat:AddToggle({ Name = "Only While Holding", Description = "clicks only while LMB is held", NoList = true,
+	Callback = function(s) AutoClick.OnlyWhenHolding = s end })
+Combat:AddKeybind({ Name = "Clicker Key", Default = Enum.KeyCode.G, Callback = function()
+	autoClickToggle:Set(not autoClickToggle:Get())
+end })
 Combat:AddSection("Rage")
 Combat:AddToggle({ Name = "Triggerbot", Callback = fake("Triggerbot") })
 Combat:AddToggle({ Name = "No Recoil", Callback = fake("No Recoil") })
